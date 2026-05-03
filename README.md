@@ -46,12 +46,12 @@ cp .env.example .env
 
 Edit `.env` and set at minimum:
 
-| Variable | Purpose |
-|----------|---------|
-| `GOOGLE_API_KEY` | Required for live LLM calls (Gemini) |
-| `DATABASE_URL` | Default: `sqlite+aiosqlite:///./helix_srop.db` |
-| `CHROMA_PERSIST_DIR` | Default: `./chroma_db` |
-| `ADK_MODEL` | Default: `gemini-2.0-flash` |
+| Variable             | Purpose                                        |
+| -------------------- | ---------------------------------------------- |
+| `GOOGLE_API_KEY`     | Required for live LLM calls (Gemini)           |
+| `DATABASE_URL`       | Default: `sqlite+aiosqlite:///./helix_srop.db` |
+| `CHROMA_PERSIST_DIR` | Default: `./chroma_db`                         |
+| `ADK_MODEL`          | Default: `gemini-2.0-flash`                    |
 
 **Security:** Never commit `.env` or API keys. This repository includes `.gitignore` rules for `.env`, `*.db`, and `chroma_db/`.
 
@@ -61,13 +61,23 @@ Edit `.env` and set at minimum:
 python -m app.rag.ingest --path docs/
 ```
 
-### 4. Run the API
+**Optional — seed SQLite** with a demo user, session, two tickets, a trace, and sample messages (safe to re-run; skips if the demo session already exists):
 
 ```bash
-uvicorn app.main:app --reload
+python -m app.db.seed
 ```
 
-Service defaults to `http://127.0.0.1:8000`.
+The command prints `user_id`, `session_id`, and `trace_id` plus example `curl` lines.
+
+### 4. Run the API
+
+From the repository root, with the same Python you used for `pip install` (venv activated on Windows, or use `.\.venv\Scripts\python.exe` instead of `python`):
+
+```bash
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Then open `http://127.0.0.1:8000/healthz`.
 
 ### 5. Verify (recommended before submission)
 
@@ -83,10 +93,10 @@ All tests should pass (integration tests mock the LLM; one unit test ingests int
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/v1/sessions` | Create session: body `{"user_id", "plan_tier"}`, returns `session_id` |
-| `POST` | `/v1/chat/{session_id}` | Send message: JSON body `{"content": "..."}`. Returns `reply`, `routed_to`, `trace_id`. **SSE:** header `Accept: text/event-stream`. **Idempotency:** optional `Idempotency-Key` — identical session + body replays the cached response (JSON or full SSE bytes) without duplicating DB writes. |
-| `GET` | `/v1/traces/{trace_id}` | Structured trace (routing, tool calls, chunk IDs, latency) |
-| `GET` | `/v1/tickets` | Query `?user_id=` — list support tickets created via the escalation agent (`GET` is read-only listing). |
+| `POST` | `/v1/sessions` | Create session (`user_id`, `plan_tier`) → `session_id` |
+| `POST` | `/v1/chat/{session_id}` | Message in, `reply` + `routed_to` + `trace_id` out. SSE: `Accept: text/event-stream`. Optional `Idempotency-Key` for safe retries. |
+| `GET` | `/v1/traces/{trace_id}` | Trace: routing, tool calls, chunk IDs, latency |
+| `GET` | `/v1/tickets?user_id=` | List tickets for a user |
 | `GET` | `/healthz` | Liveness |
 
 **Errors (RFC 7807-style JSON):** `SESSION_NOT_FOUND` (404), `TRACE_NOT_FOUND` (404), `UPSTREAM_TIMEOUT` (504).
@@ -135,9 +145,10 @@ Client
   |-- execute_turn (Google ADK)
   |       Runner (in-memory services, auto_create_session=True)
   |         LlmAgent "srop_root"
-  |           tools: AgentTool(knowledge), AgentTool(account)
+  |           tools: AgentTool(knowledge), AgentTool(account), AgentTool(escalation)
   |             knowledge  -> search_docs  -> Chroma
   |             account    -> get_recent_builds, get_account_status (mock data)
+  |             escalation -> create_ticket (SQLite tickets)
   |-- Persist messages, AgentTrace, updated SessionState
   v
  JSON reply + trace_id
@@ -209,17 +220,13 @@ The API listens on port **8000**. SQLite and Chroma paths default under `./data`
 
 ## Evaluation harness (E7)
 
-With the API running locally:
+With the API running on port 8000:
 
 ```bash
 python eval/run_eval.py
-python eval/run_eval.py --help
 ```
 
-- **Default:** health, session, chat, tickets, then **idempotency** (two identical `POST`s with `Idempotency-Key`) and **guardrails** (blocked prompt → `routed_to: guardrails`). Prints one JSON line to stdout on success.
-- **`--skip-extended`:** only the first four checks (useful if you want a quicker smoke without E1/E5 probes).
-- **Base URL:** `--base-url http://127.0.0.1:9000` or `EVAL_BASE_URL=...`.
-- **Verbose:** `-v` logs each step to stderr.
+Use `python eval/run_eval.py --help` for options (`--base-url`, `--skip-extended`, `-v`).
 
 ---
 
@@ -227,13 +234,13 @@ python eval/run_eval.py --help
 
 | ID | Feature | Status |
 |----|---------|--------|
-| E1 | Idempotency (`Idempotency-Key`) | **Implemented** — `idempotency_keys` table; JSON + SSE payloads keyed by header hash + body fingerprint (`app/services/idempotency.py`, `routes_chat`) |
-| E2 | Escalation agent + `tickets` table | **Implemented** — `escalation` sub-agent + `create_ticket` tool (`escalation_tools`), context-bound DB session (`tool_context`), `GET /v1/tickets` |
-| E3 | SSE on `POST /v1/chat/{id}` with `Accept: text/event-stream` | **Implemented** — ADK `StreamingMode.SSE`; falls back to chunking final text if the model emits no partials |
-| E4 | Reranking | **Implemented** — oversampled Chroma retrieval + Gemini reordering with lexical fallback (`app/rag/rerank.py`); toggle `RERANK_ENABLED` |
-| E5 | Guardrails + PII redaction | **Implemented** — prompt-injection / abuse heuristics short-circuit before LLM (`guardrails/policies`); structlog scrubs sensitive keys; optional email/phone masking in logs |
-| E6 | Docker / Compose | **Implemented** — `Dockerfile`, `docker-compose.yml` |
-| E7 | Eval harness | **Implemented** — `eval/run_eval.py` (CLI: `--base-url`, `-v`, `--skip-extended`; JSON result; idempotency + guardrail probes by default) |
+| E1 | Idempotency (`Idempotency-Key`) | Implemented |
+| E2 | Escalation agent + `tickets` table | Implemented |
+| E3 | SSE (`Accept: text/event-stream`) | Implemented |
+| E4 | Reranking | Implemented |
+| E5 | Guardrails + PII redaction | Implemented |
+| E6 | Docker / Compose | Implemented |
+| E7 | Eval harness (`eval/run_eval.py`) | Implemented |
 
 ---
 
@@ -248,24 +255,24 @@ pytest -q
 
 | Item | Status |
 |------|--------|
-| README: setup, architecture, state + chunking decisions, limitations, time spent | Done |
-| `pytest -q` passes from a clean clone (after `pip install -e ".[dev]"` or `uv sync`, `cp .env.example .env`; ingest not required for mocked integration tests) | Done |
-| `.env` / local DB / `chroma_db` excluded from git (`.gitignore`) | Done |
-| GitHub repository public or reviewer invited | **Your step:** push `main`, confirm repo URL in README |
-| Loom (≤4 min): multi-turn across **knowledge** and **account**, restart `uvicorn`, show state still works | **Your step:** record & link — see `LOOM_DEMO.md` for a timed script + files |
+| README: setup, architecture, limitations, time spent | Done |
+| `pytest -q` passes after `pip install -e ".[dev]"` or `uv sync`, `cp .env.example .env` | Done |
+| `.env` / DB / `chroma_db` gitignored | Done |
+| GitHub repo | Your step |
+| Loom (≤4 min): knowledge + account, restart server, state persists | Your step |
 
 ---
 
 ## Time spent
 
-| Phase | Hours (approx.) |
-|-------|-----------------|
-| Environment, dependencies, DB models, FastAPI shell | 0.75 |
-| RAG ingest (`chunk_markdown`, metadata, Chroma upsert) + `search_docs` | 1.00 |
-| ADK root + Knowledge/Account sub-agents (`AgentTool`), `execute_turn`, timeouts | 1.25 |
-| `pipeline.run`, traces, session routes, error handlers | 1.00 |
-| Tests (`conftest`, integration + unit), README, `.gitignore`, polish | 0.75 |
-| **Total** | **~4.75** |
+| Phase                                                                           | Hours (approx.) |
+| ------------------------------------------------------------------------------- | --------------- |
+| Environment, dependencies, DB models, FastAPI shell                             | 0.75            |
+| RAG ingest (`chunk_markdown`, metadata, Chroma upsert) + `search_docs`          | 1.00            |
+| ADK root + Knowledge/Account sub-agents (`AgentTool`), `execute_turn`, timeouts | 1.25            |
+| `pipeline.run`, traces, session routes, error handlers                          | 1.00            |
+| Tests (`conftest`, integration + unit), README, `.gitignore`, polish            | 0.75            |
+| **Total**                                                                       | **~4.75**       |
 
 ---
 

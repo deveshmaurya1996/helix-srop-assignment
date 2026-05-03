@@ -53,6 +53,7 @@ async def chat(
 
     Error cases:
     - Session not found → 404
+    - Gemini quota / rate limit → 429 (``RATE_LIMITED`` problem detail)
     - LLM timeout → 504
 
     **SSE:** send ``Accept: text/event-stream`` to receive ``data:`` JSON lines

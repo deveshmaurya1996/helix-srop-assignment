@@ -16,17 +16,25 @@ from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.tools.agent_tool import AgentTool
 from google.genai import types
+from google.genai.errors import ClientError
 
 from app.agents.tools import account_tools, escalation_tools
 from app.agents.tools import search_docs as search_docs_tool
 from app.agents.trace_context import get_recorded_chunk_ids, reset_trace_buffers
-from app.api.errors import UpstreamTimeoutError
+from app.api.errors import RateLimitedError, UpstreamTimeoutError
 from app.settings import settings
 from app.srop.state import SessionState
 
 # Ensure Gemini can pick up the key from the environment.
 if settings.google_api_key:
     os.environ.setdefault("GOOGLE_API_KEY", settings.google_api_key)
+
+
+def _raise_if_gemini_rate_limit(exc: BaseException) -> None:
+    """Map GenAI quota / RPM errors to HTTP 429 instead of an opaque 500."""
+    if isinstance(exc, ClientError) and getattr(exc, "code", None) == 429:
+        detail = getattr(exc, "message", None) or str(exc)
+        raise RateLimitedError(detail) from exc
 
 ROOT_BASE = """
 You are the Helix Support Concierge — a routing agent.
@@ -249,6 +257,9 @@ async def execute_turn(session_id: str, user_message: str, state: SessionState) 
         raise UpstreamTimeoutError(
             f"LLM did not respond within {settings.llm_timeout_seconds}s"
         ) from exc
+    except ClientError as exc:
+        _raise_if_gemini_rate_limit(exc)
+        raise
 
     tool_calls = _merge_tool_calls(events)
     chunk_ids = get_recorded_chunk_ids()
@@ -316,20 +327,24 @@ async def execute_turn_stream(
     cumul_displayed = ""
     emitted_delta = False
 
-    async for event in gen:
-        events.append(event)
+    try:
+        async for event in gen:
+            events.append(event)
 
-        if getattr(event, "partial", None) and event.content and event.content.parts:
-            has_fc = any(p.function_call for p in event.content.parts)
-            has_text = any(getattr(p, "text", None) for p in event.content.parts)
-            if has_text and not has_fc:
-                chunk_full = "".join(p.text or "" for p in event.content.parts)
-                if chunk_full.startswith(cumul_displayed):
-                    delta = chunk_full[len(cumul_displayed) :]
-                    cumul_displayed = chunk_full
-                    if delta:
-                        emitted_delta = True
-                        yield ("delta", delta)
+            if getattr(event, "partial", None) and event.content and event.content.parts:
+                has_fc = any(p.function_call for p in event.content.parts)
+                has_text = any(getattr(p, "text", None) for p in event.content.parts)
+                if has_text and not has_fc:
+                    chunk_full = "".join(p.text or "" for p in event.content.parts)
+                    if chunk_full.startswith(cumul_displayed):
+                        delta = chunk_full[len(cumul_displayed) :]
+                        cumul_displayed = chunk_full
+                        if delta:
+                            emitted_delta = True
+                            yield ("delta", delta)
+    except ClientError as exc:
+        _raise_if_gemini_rate_limit(exc)
+        raise
 
     final_text, final_author = _final_reply_from_events(events)
     routed = _normalize_author(final_author, final_text)
