@@ -17,5 +17,10 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 30
     tool_timeout_seconds: int = 10
 
+    idempotency_enabled: bool = True
+    rerank_enabled: bool = True
+    rerank_oversample: int = 3
+    guardrails_enabled: bool = True
+
 
 settings = Settings()

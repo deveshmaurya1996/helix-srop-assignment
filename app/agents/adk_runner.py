@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
 from google.adk.events import Event
 from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
@@ -15,7 +17,7 @@ from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.tools.agent_tool import AgentTool
 from google.genai import types
 
-from app.agents.tools import account_tools
+from app.agents.tools import account_tools, escalation_tools
 from app.agents.tools import search_docs as search_docs_tool
 from app.agents.trace_context import get_recorded_chunk_ids, reset_trace_buffers
 from app.api.errors import UpstreamTimeoutError
@@ -28,14 +30,18 @@ if settings.google_api_key:
 
 ROOT_BASE = """
 You are the Helix Support Concierge — a routing agent.
-You have two specialist tools (sub-agents):
+You have specialist tools (sub-agents):
 - **knowledge**: product documentation, how-to, "what is", security, CI, billing policy questions.
 - **account**: the user's builds, usage, plan limits, "last failed builds", account status.
+- **escalation**: open a human-support ticket for billing disputes, suspected account compromise,
+  legal/compliance, abuse reports, or when the user explicitly asks for a human.
 
 Rules:
 - If the user asks how something works or about Helix features → call **knowledge**.
 - If the user asks about *their* data (builds, account, usage)
   → call **account** with the user_id from context.
+- If the user needs a human (escalation, dispute, lockout, ticket) → call **escalation**
+  (it will create a ticket via create_ticket).
 - Simple greetings, thanks, or chit-chat → answer directly (no tool call).
 
 Never invent detailed procedures without calling **knowledge**.
@@ -62,6 +68,25 @@ Steps:
 2. Answer using ONLY retrieved content. Quote chunk IDs inline like [chunk_xxxxxxxx] for each claim.
 
 If search_docs returns nothing relevant, say you could not find it in the docs.
+"""
+
+
+def _escalation_instruction() -> str:
+    return """
+You handle escalation to human support for Helix.
+
+When to act:
+- User asks for a human, manager, or ticket.
+- Billing disputes, refunds outside self-serve policy.
+- Suspected account takeover or security incidents.
+- Legal, privacy, or compliance requests.
+
+Steps:
+1. Summarize the issue in one short sentence for the ticket summary.
+2. Choose priority: low | normal | high | urgent (urgent only for lockout/security).
+3. Call create_ticket(summary=..., priority=...).
+
+Confirm the ticket_id to the user and set expectations (business hours, email follow-up).
 """
 
 
@@ -92,6 +117,13 @@ def build_agents(state: SessionState) -> LlmAgent:
         tools=[account_tools.get_recent_builds, account_tools.get_account_status],
     )
 
+    escalation_agent = LlmAgent(
+        name="escalation",
+        model=settings.adk_model,
+        instruction=_escalation_instruction(),
+        tools=[escalation_tools.create_ticket],
+    )
+
     root_agent = LlmAgent(
         name="srop_root",
         model=settings.adk_model,
@@ -99,6 +131,7 @@ def build_agents(state: SessionState) -> LlmAgent:
         tools=[
             AgentTool(agent=knowledge_agent),
             AgentTool(agent=account_agent),
+            AgentTool(agent=escalation_agent),
         ],
     )
     return root_agent
@@ -149,9 +182,13 @@ def _normalize_author(author: str | None, reply: str) -> str:
         return "knowledge"
     if "account" in a:
         return "account"
+    if "escalation" in a:
+        return "escalation"
     if "srop_root" in a or "root" in a:
         return "smalltalk"
     rl = reply.lower()
+    if "tk_" in rl or ("ticket" in rl and "created" in rl):
+        return "escalation"
     if any(x in rl for x in ("chunk_", "[chunk_")):
         return "knowledge"
     return "smalltalk"
@@ -221,4 +258,97 @@ async def execute_turn(session_id: str, user_message: str, state: SessionState) 
         routed_to=routed,
         tool_calls=tool_calls,
         retrieved_chunk_ids=chunk_ids,
+    )
+
+
+def _final_reply_from_events(events: list[Event]) -> tuple[str, str | None]:
+    """Extract assistant reply text and author from collected ADK events."""
+    final_text = ""
+    final_author: str | None = None
+    for event in events:
+        if event.is_final_response() and event.content and event.content.parts:
+            text_parts = [p.text for p in event.content.parts if getattr(p, "text", None)]
+            if text_parts:
+                final_text = "\n".join(text_parts).strip()
+                final_author = event.author
+    if not final_text:
+        final_text = "(No response generated.)"
+    return final_text, final_author
+
+
+async def execute_turn_stream(
+    session_id: str, user_message: str, state: SessionState
+) -> AsyncIterator[tuple[str, Any]]:
+    """
+    Stream one ADK turn using Gemini SSE-style partial events.
+
+    Yields:
+        ("delta", str) — incremental assistant text for the client (SSE).
+        ("complete", AdkTurnResult) — final structured result for persistence.
+
+    Non-streaming callers should use execute_turn() instead.
+    """
+    reset_trace_buffers()
+    root = build_agents(state)
+    runner = Runner(
+        app_name="helix_srop",
+        agent=root,
+        artifact_service=InMemoryArtifactService(),
+        session_service=InMemorySessionService(),
+        memory_service=InMemoryMemoryService(),
+        auto_create_session=True,
+    )
+
+    new_message = types.Content(
+        role="user",
+        parts=[types.Part(text=user_message)],
+    )
+
+    run_config = RunConfig(streaming_mode=StreamingMode.SSE)
+    gen = runner.run_async(
+        user_id=state.user_id,
+        session_id=session_id,
+        new_message=new_message,
+        run_config=run_config,
+    )
+
+    events: list[Event] = []
+    cumul_displayed = ""
+    emitted_delta = False
+
+    async for event in gen:
+        events.append(event)
+
+        if getattr(event, "partial", None) and event.content and event.content.parts:
+            has_fc = any(p.function_call for p in event.content.parts)
+            has_text = any(getattr(p, "text", None) for p in event.content.parts)
+            if has_text and not has_fc:
+                chunk_full = "".join(p.text or "" for p in event.content.parts)
+                if chunk_full.startswith(cumul_displayed):
+                    delta = chunk_full[len(cumul_displayed) :]
+                    cumul_displayed = chunk_full
+                    if delta:
+                        emitted_delta = True
+                        yield ("delta", delta)
+
+    final_text, final_author = _final_reply_from_events(events)
+    routed = _normalize_author(final_author, final_text)
+
+    if not emitted_delta and final_text and final_text != "(No response generated.)":
+        # No partial tokens observed — chunk final reply so SSE still demonstrates streaming.
+        step = 48
+        for i in range(0, len(final_text), step):
+            yield ("delta", final_text[i : i + step])
+
+    tool_calls = _merge_tool_calls(events)
+    chunk_ids = get_recorded_chunk_ids()
+
+    yield (
+        "complete",
+        AdkTurnResult(
+            reply=final_text,
+            routed_to=routed,
+            tool_calls=tool_calls,
+            retrieved_chunk_ids=chunk_ids,
+        ),
     )

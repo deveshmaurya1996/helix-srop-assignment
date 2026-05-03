@@ -84,8 +84,9 @@ All tests should pass (integration tests mock the LLM; one unit test ingests int
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/sessions` | Create session: body `{"user_id", "plan_tier"}`, returns `session_id` |
-| `POST` | `/v1/chat/{session_id}` | Send message: returns `reply`, `routed_to`, `trace_id` |
+| `POST` | `/v1/chat/{session_id}` | Send message: JSON body `{"content": "..."}`. Returns `reply`, `routed_to`, `trace_id`. **SSE:** header `Accept: text/event-stream`. **Idempotency:** optional `Idempotency-Key` — identical session + body replays the cached response (JSON or full SSE bytes) without duplicating DB writes. |
 | `GET` | `/v1/traces/{trace_id}` | Structured trace (routing, tool calls, chunk IDs, latency) |
+| `GET` | `/v1/tickets` | Query `?user_id=` — list support tickets created via the escalation agent (`GET` is read-only listing). |
 | `GET` | `/healthz` | Liveness |
 
 **Errors (RFC 7807-style JSON):** `SESSION_NOT_FOUND` (404), `TRACE_NOT_FOUND` (404), `UPSTREAM_TIMEOUT` (504).
@@ -179,6 +180,7 @@ pytest -q
 
 ## Known limitations
 
+- **Idempotent retries** are best-effort: concurrent duplicate requests with the same key may both execute once before either cache row commits (acceptable for this SQLite demo; production would use a distributed lock or transactional outbox).
 - **Account tools** return **mock** build and usage data; wiring and ADK integration are what reviewers exercise.
 - **`get_account_status`** mock does not dynamically read `plan_tier` from the DB; the **root/account instructions** carry the real tier from `SessionState` for coherent answers.
 - **Routing metadata** (`routed_to`) is derived from ADK event authors and fallbacks when authors are ambiguous.
@@ -188,24 +190,50 @@ pytest -q
 
 ## What I would add with more time
 
-- **E1–E7 extensions** from `ASSIGNMENT.md` (idempotency, escalation agent, SSE, reranking, guardrails, Docker, eval harness).
 - **Alembic migrations** instead of `create_all` on startup for production.
 - **Stronger routing attribution** by parsing ADK events only (no heuristics on reply text).
 - **Dynamic `get_account_status`** backed by real usage tables when schema exists.
+- **Distributed idempotency** (Redis / advisory locks) for concurrent retries with the same key.
 
 ---
 
-## Optional extensions (not implemented in this submission)
+## Docker (E6)
 
-| ID | Feature |
-|----|---------|
-| E1 | Idempotency (`Idempotency-Key`) |
-| E2 | Escalation agent + `tickets` table |
-| E3 | SSE streaming (`Accept: text/event-stream`) |
-| E4 | Reranking |
-| E5 | Guardrails + PII redaction |
-| E6 | Docker / Compose |
-| E7 | Eval harness |
+```bash
+docker compose up --build
+```
+
+The API listens on port **8000**. SQLite and Chroma paths default under `./data` inside the container via `DATABASE_URL` / `CHROMA_PERSIST_DIR` in `docker-compose.yml`. Provide `GOOGLE_API_KEY` via `.env`.
+
+---
+
+## Evaluation harness (E7)
+
+With the API running locally:
+
+```bash
+python eval/run_eval.py
+python eval/run_eval.py --help
+```
+
+- **Default:** health, session, chat, tickets, then **idempotency** (two identical `POST`s with `Idempotency-Key`) and **guardrails** (blocked prompt → `routed_to: guardrails`). Prints one JSON line to stdout on success.
+- **`--skip-extended`:** only the first four checks (useful if you want a quicker smoke without E1/E5 probes).
+- **Base URL:** `--base-url http://127.0.0.1:9000` or `EVAL_BASE_URL=...`.
+- **Verbose:** `-v` logs each step to stderr.
+
+---
+
+## Extensions status (`ASSIGNMENT.md` Section 4)
+
+| ID | Feature | Status |
+|----|---------|--------|
+| E1 | Idempotency (`Idempotency-Key`) | **Implemented** — `idempotency_keys` table; JSON + SSE payloads keyed by header hash + body fingerprint (`app/services/idempotency.py`, `routes_chat`) |
+| E2 | Escalation agent + `tickets` table | **Implemented** — `escalation` sub-agent + `create_ticket` tool (`escalation_tools`), context-bound DB session (`tool_context`), `GET /v1/tickets` |
+| E3 | SSE on `POST /v1/chat/{id}` with `Accept: text/event-stream` | **Implemented** — ADK `StreamingMode.SSE`; falls back to chunking final text if the model emits no partials |
+| E4 | Reranking | **Implemented** — oversampled Chroma retrieval + Gemini reordering with lexical fallback (`app/rag/rerank.py`); toggle `RERANK_ENABLED` |
+| E5 | Guardrails + PII redaction | **Implemented** — prompt-injection / abuse heuristics short-circuit before LLM (`guardrails/policies`); structlog scrubs sensitive keys; optional email/phone masking in logs |
+| E6 | Docker / Compose | **Implemented** — `Dockerfile`, `docker-compose.yml` |
+| E7 | Eval harness | **Implemented** — `eval/run_eval.py` (CLI: `--base-url`, `-v`, `--skip-extended`; JSON result; idempotency + guardrail probes by default) |
 
 ---
 
@@ -214,7 +242,7 @@ pytest -q
 **Verify locally before you push:**
 
 ```bash
-ruff check app tests
+ruff check app tests eval
 pytest -q
 ```
 
@@ -224,7 +252,7 @@ pytest -q
 | `pytest -q` passes from a clean clone (after `pip install -e ".[dev]"` or `uv sync`, `cp .env.example .env`; ingest not required for mocked integration tests) | Done |
 | `.env` / local DB / `chroma_db` excluded from git (`.gitignore`) | Done |
 | GitHub repository public or reviewer invited | **Your step:** push `main`, confirm repo URL in README |
-| Loom (≤4 min): multi-turn across **knowledge** and **account**, restart `uvicorn`, show state still works | **Your step:** record & link (cannot be automated) |
+| Loom (≤4 min): multi-turn across **knowledge** and **account**, restart `uvicorn`, show state still works | **Your step:** record & link — see `LOOM_DEMO.md` for a timed script + files |
 
 ---
 

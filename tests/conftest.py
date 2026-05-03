@@ -67,4 +67,10 @@ def mock_adk(monkeypatch):
             retrieved_chunk_ids=[],
         )
 
+    async def fake_execute_turn_stream(session_id, user_message, state):
+        res = await fake_execute_turn(session_id, user_message, state)
+        yield ("delta", res.reply)
+        yield ("complete", res)
+
     monkeypatch.setattr("app.srop.pipeline.execute_turn", fake_execute_turn)
+    monkeypatch.setattr("app.srop.pipeline.execute_turn_stream", fake_execute_turn_stream)

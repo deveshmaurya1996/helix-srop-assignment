@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import routes_chat, routes_sessions, routes_traces
+from app.api import routes_chat, routes_sessions, routes_tickets, routes_traces
 from app.api.errors import HelixError, helix_error_handler
 from app.db.session import init_db
 from app.obs.logging import configure_logging
@@ -22,6 +22,7 @@ app.add_exception_handler(HelixError, helix_error_handler)
 app.include_router(routes_sessions.router, prefix="/v1")
 app.include_router(routes_chat.router, prefix="/v1")
 app.include_router(routes_traces.router, prefix="/v1")
+app.include_router(routes_tickets.router, prefix="/v1")
 
 
 @app.get("/healthz")

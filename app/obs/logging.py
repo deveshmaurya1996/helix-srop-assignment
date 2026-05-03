@@ -9,6 +9,19 @@ import sys
 
 import structlog
 
+from app.guardrails.policies import redact_pii_for_logs
+
+_SENSITIVE_KEYS = frozenset(
+    {"content", "message", "user_message", "reply", "text", "body", "prompt"}
+)
+
+
+def _scrub_pii_processor(_logger: object, _method: str, event_dict: dict) -> dict:
+    for key in list(event_dict.keys()):
+        if key in _SENSITIVE_KEYS and isinstance(event_dict[key], str):
+            event_dict[key] = redact_pii_for_logs(event_dict[key])
+    return event_dict
+
 
 def configure_logging() -> None:
     structlog.configure(
@@ -16,6 +29,7 @@ def configure_logging() -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
+            _scrub_pii_processor,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),

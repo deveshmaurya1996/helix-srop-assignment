@@ -1,18 +1,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from app.agents.trace_context import record_chunk_ids
+from app.rag.doc_types import DocChunk
+from app.rag.rerank import rerank_chunks
 from app.rag.vector_store import distance_to_score, get_collection
-
-
-@dataclass
-class DocChunk:
-    chunk_id: str
-    score: float
-    content: str
-    metadata: dict
+from app.settings import settings
 
 
 async def search_docs(query: str, k: int = 5, product_area: str | None = None) -> list[DocChunk]:
@@ -23,10 +16,13 @@ async def search_docs(query: str, k: int = 5, product_area: str | None = None) -
     if not q:
         return []
 
+    oversample = settings.rerank_oversample if settings.rerank_enabled else 1
+    n_fetch = min(max(k * max(oversample, 1), 1), 50)
+
     def _query():
         return collection.query(
             query_texts=[q],
-            n_results=min(max(k, 1), 50),
+            n_results=n_fetch,
             include=["documents", "distances", "metadatas"],
         )
 
@@ -58,6 +54,10 @@ async def search_docs(query: str, k: int = 5, product_area: str | None = None) -
         out.append(DocChunk(chunk_id=cid, score=score, content=doc or "", metadata=meta))
         chunk_ids.append(cid)
 
-    record_chunk_ids(chunk_ids)
     out.sort(key=lambda c: c.score, reverse=True)
-    return out[:k]
+    if settings.rerank_enabled and len(out) > k:
+        out = await rerank_chunks(q, out, k)
+    else:
+        out = out[:k]
+    record_chunk_ids([c.chunk_id for c in out])
+    return out
