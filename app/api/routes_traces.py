@@ -1,4 +1,4 @@
-
+"""GET /v1/traces/{trace_id} — structured observability for one assistant turn."""
 from __future__ import annotations
 
 from typing import Any

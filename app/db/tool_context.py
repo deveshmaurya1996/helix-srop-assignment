@@ -1,6 +1,8 @@
 """
 Request-scoped context for tools that need DB / session metadata (E2 escalation).
-Set by the SROP pipeline around ADK execution.
+
+Contextvars follow the running asyncio Task — set in `pipeline.run` / `run_stream`
+around ADK execution so sync tool functions can `flush()` without passing db through ADK.
 """
 from __future__ import annotations
 

@@ -1,3 +1,4 @@
+"""Pydantic model for `sessions.state` JSON — persisted durable session for ADK instructions."""
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -6,7 +7,8 @@ from pydantic import BaseModel, Field
 class SessionState(BaseModel):
     user_id: str
     plan_tier: str = Field(default="free")
-    last_agent: str | None = None  # knowledge | account | smalltalk
+    # Last routing bucket we attribute after a turn (includes escalation, guardrails, smalltalk)
+    last_agent: str | None = None
     turn_count: int = 0
 
     def to_db_dict(self) -> dict:

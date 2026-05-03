@@ -38,6 +38,7 @@ class GuardrailResult:
 
 
 def evaluate_user_message(text: str) -> GuardrailResult:
+    """Pre-LLM gate: prompt-injection-ish phrases and oversized payloads → refusal (E5)."""
     if not settings.guardrails_enabled:
         return GuardrailResult(allowed=True)
     t = (text or "").strip().lower()

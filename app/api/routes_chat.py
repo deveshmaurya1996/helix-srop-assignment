@@ -65,6 +65,7 @@ async def chat(
     wants_sse = _wants_sse(accept)
 
     if idempotency_key and settings.idempotency_enabled:
+        # E1: replay only when header + session + body + JSON/SSE mode match a stored row
         cached = await idem_svc.get_cached_response(
             db, idempotency_key, session_id, body.content, wants_sse
         )

@@ -1,3 +1,4 @@
+"""CLI: chunk markdown, embed with Chroma default EF, upsert into persistent collection."""
 from __future__ import annotations
 
 import argparse

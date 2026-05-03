@@ -1,3 +1,4 @@
+"""Async SQLAlchemy engine/session factory wired from `settings.database_url`."""
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.settings import settings

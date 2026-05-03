@@ -1,3 +1,4 @@
+"""Buffers chunk IDs from ``search_docs`` for ``agent_traces.retrieved_chunk_ids``."""
 from contextvars import ContextVar
 
 _chunk_ids: ContextVar[list[str] | None] = ContextVar("chunk_ids", default=None)

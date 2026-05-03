@@ -1,3 +1,4 @@
+"""Mock Helix CI / billing data for the account sub-agent (assignment allows non-DB backends)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -60,6 +61,7 @@ async def get_recent_builds(user_id: str, limit: int = 5) -> list[BuildSummary]:
 
 
 async def get_account_status(user_id: str) -> AccountStatus:
+    # Static mock tier; real tier lives in SessionState → account agent instructions.
     return AccountStatus(
         user_id=user_id,
         plan_tier="pro",

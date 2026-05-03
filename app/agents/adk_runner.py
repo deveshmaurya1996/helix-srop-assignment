@@ -1,4 +1,9 @@
+"""
+Google ADK wiring: root `LlmAgent` + `AgentTool` sub-agents, `Runner`, turn execution.
 
+Routing is native tool selection (not string-parsing LLM output). Durable session fields
+live in SQLite (`SessionState`); ADK's session/memory services here are in-memory only.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -30,7 +35,7 @@ if settings.google_api_key:
     os.environ.setdefault("GOOGLE_API_KEY", settings.google_api_key)
 
 
-def _raise_if_gemini_rate_limit(exc: BaseException) -> None:
+def _raise_if_gemini_rate_limit(exc: ClientError) -> None:
     """Map GenAI quota / RPM errors to HTTP 429 instead of an opaque 500."""
     if isinstance(exc, ClientError) and getattr(exc, "code", None) == 429:
         detail = getattr(exc, "message", None) or str(exc)
@@ -110,6 +115,7 @@ Respond with concise bullet points when listing builds.
 
 
 def build_agents(state: SessionState) -> LlmAgent:
+    """Build a fresh agent graph each turn so prompts match latest ``SessionState``."""
 
     knowledge_agent = LlmAgent(
         name="knowledge",
@@ -137,7 +143,7 @@ def build_agents(state: SessionState) -> LlmAgent:
         model=settings.adk_model,
         instruction=_root_instruction(state),
         tools=[
-            AgentTool(agent=knowledge_agent),
+            AgentTool(agent=knowledge_agent),  # assignment: sub-agent as tool, not string routing
             AgentTool(agent=account_agent),
             AgentTool(agent=escalation_agent),
         ],
@@ -155,6 +161,7 @@ def _serialize_tool_result(result: Any) -> Any:
 
 
 def _merge_tool_calls(events: list[Event]) -> list[dict[str, Any]]:
+    """Flatten ADK events into ordered tool_call rows for `agent_traces.tool_calls` JSON."""
     rows: list[dict[str, Any]] = []
     for event in events:
         for fc in event.get_function_calls():
@@ -185,6 +192,7 @@ def _merge_tool_calls(events: list[Event]) -> list[dict[str, Any]]:
 
 
 def _normalize_author(author: str | None, reply: str) -> str:
+    """Map ADK `event.author` (+ light reply heuristics) to API `routed_to` string."""
     a = (author or "").lower()
     if "knowledge" in a:
         return "knowledge"
@@ -217,7 +225,7 @@ async def execute_turn(session_id: str, user_message: str, state: SessionState) 
         app_name="helix_srop",
         agent=root,
         artifact_service=InMemoryArtifactService(),
-        session_service=InMemorySessionService(),
+        session_service=InMemorySessionService(),  # not durable; app DB holds conversation truth
         memory_service=InMemoryMemoryService(),
         auto_create_session=True,
     )
@@ -305,7 +313,7 @@ async def execute_turn_stream(
         app_name="helix_srop",
         agent=root,
         artifact_service=InMemoryArtifactService(),
-        session_service=InMemorySessionService(),
+        session_service=InMemorySessionService(),  # in-memory; SQLite is canonical
         memory_service=InMemoryMemoryService(),
         auto_create_session=True,
     )
@@ -315,7 +323,7 @@ async def execute_turn_stream(
         parts=[types.Part(text=user_message)],
     )
 
-    run_config = RunConfig(streaming_mode=StreamingMode.SSE)
+    run_config = RunConfig(streaming_mode=StreamingMode.SSE)  # token-delta events from Gemini
     gen = runner.run_async(
         user_id=state.user_id,
         session_id=session_id,

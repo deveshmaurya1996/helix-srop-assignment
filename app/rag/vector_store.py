@@ -1,3 +1,4 @@
+"""Chroma persistent client and shared ``helix_docs`` collection (cosine + default EF)."""
 from __future__ import annotations
 
 import chromadb

@@ -17,6 +17,7 @@ def _hash_key(header_value: str) -> str:
 
 
 def body_fingerprint(session_id: str, content: str, wants_sse: bool) -> str:
+    """Same key + different body or stream mode must not replay a mismatched cached response."""
     raw = f"{session_id}\n{content}\n{'sse' if wants_sse else 'json'}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 

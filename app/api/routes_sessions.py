@@ -1,3 +1,4 @@
+"""POST /v1/sessions: create user row, new session, initial ``SessionState`` JSON."""
 from __future__ import annotations
 
 import uuid

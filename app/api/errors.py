@@ -34,6 +34,8 @@ class UpstreamTimeoutError(HelixError):
 
 
 class RateLimitedError(HelixError):
+    """Gemini HTTP 429 / quota (from ``google.genai.errors.ClientError``)."""
+
     status_code = 429
     error_code = "RATE_LIMITED"
 

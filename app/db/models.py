@@ -1,3 +1,4 @@
+"""SQLAlchemy ORM models: users, sessions (JSON state), messages, traces, idempotency, tickets."""
 from datetime import datetime
 from typing import Any
 
@@ -24,7 +25,7 @@ class Session(Base):
 
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.user_id"), index=True)
-    state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # `SessionState.model_dump()`
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

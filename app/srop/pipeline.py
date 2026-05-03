@@ -1,3 +1,8 @@
+"""
+SROP chat pipeline: load session → persist user message → guardrails → ADK → traces.
+
+Keeps orchestration out of FastAPI routes so tests can patch `execute_turn` / `execute_turn_stream`.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -29,6 +34,7 @@ class PipelineResult:
 
 
 def _json_safe_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Round-trip through JSON so ORM JSON column never sees non-serializable tool results."""
     raw = json.dumps(calls, default=str)
     return json.loads(raw)
 
@@ -54,10 +60,11 @@ async def run(session_id: str, user_message: str, db: AsyncSession) -> PipelineR
         )
     )
 
-    await db.flush()
+    await db.flush()  # user row visible for FKs before optional ADK/tool side effects
 
     gr = evaluate_user_message(user_message)
     if not gr.allowed:
+        # E5: skip LLM entirely; still one full "turn" in DB for auditability
         refusal = gr.refusal_message or "I cannot help with that request."
         latency_ms = 0
         state.turn_count += 1
@@ -87,6 +94,7 @@ async def run(session_id: str, user_message: str, db: AsyncSession) -> PipelineR
         return PipelineResult(content=refusal, routed_to="guardrails", trace_id=trace_id)
 
     t0 = time.perf_counter()
+    # E2: create_ticket reads AsyncSession + ids from contextvars (sync ADK tool boundary)
     t_db, t_sid, t_uid = tool_context.bind(db, session_id, state.user_id)
     try:
         adk: AdkTurnResult = await execute_turn(session_id, user_message, state)
@@ -159,10 +167,11 @@ async def run_stream(
         )
     )
 
-    await db.flush()
+    await db.flush()  # user row visible before streaming ADK output
 
     gr = evaluate_user_message(user_message)
     if not gr.allowed:
+        # E5: stream refusal as synthetic deltas so SSE contract matches happy path
         refusal = gr.refusal_message or "I cannot help with that request."
         step = 48
         for i in range(0, len(refusal), step):

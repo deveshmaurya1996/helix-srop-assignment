@@ -1,4 +1,4 @@
-
+"""ADK tool: Chroma retrieval, optional rerank (E4), chunk IDs for traces."""
 from __future__ import annotations
 
 from app.agents.trace_context import record_chunk_ids
@@ -17,7 +17,7 @@ async def search_docs(query: str, k: int = 5, product_area: str | None = None) -
         return []
 
     oversample = settings.rerank_oversample if settings.rerank_enabled else 1
-    n_fetch = min(max(k * max(oversample, 1), 1), 50)
+    n_fetch = min(max(k * max(oversample, 1), 1), 50)  # fetch more than k when reranking
 
     def _query():
         return collection.query(
@@ -26,7 +26,7 @@ async def search_docs(query: str, k: int = 5, product_area: str | None = None) -
             include=["documents", "distances", "metadatas"],
         )
 
-    raw = await asyncio.to_thread(_query)
+    raw = await asyncio.to_thread(_query)  # Chroma client is sync; keep event loop unblocked
     ids_list = raw.get("ids") or []
     docs_list = raw.get("documents") or []
     dist_list = raw.get("distances") or []

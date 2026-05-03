@@ -1,3 +1,4 @@
+"""Helix SROP FastAPI entrypoint: REST API v1, DB init on startup, typed error responses."""
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
