@@ -1,7 +1,3 @@
-"""
-Database models — SQLAlchemy 2.x async, Postgres-compatible schema.
-All timestamps UTC. JSON columns store Python dicts/lists.
-"""
 from datetime import datetime
 from typing import Any
 
@@ -28,13 +24,16 @@ class Session(Base):
 
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.user_id"), index=True)
-    # SessionState serialized as JSON — see app/srop/state.py
     state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
     user: Mapped["User"] = relationship(back_populates="sessions")
-    messages: Mapped[list["Message"]] = relationship(back_populates="session", order_by="Message.created_at")
+    messages: Mapped[list["Message"]] = relationship(
+        back_populates="session", order_by="Message.created_at"
+    )
 
 
 class Message(Base):
@@ -42,7 +41,7 @@ class Message(Base):
 
     message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), index=True)
-    role: Mapped[str] = mapped_column(String(16))  # user | assistant
+    role: Mapped[str] = mapped_column(String(16))
     content: Mapped[str] = mapped_column(Text)
     trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -55,7 +54,7 @@ class AgentTrace(Base):
 
     trace_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     session_id: Mapped[str] = mapped_column(String(64), index=True)
-    routed_to: Mapped[str] = mapped_column(String(32))        # knowledge | account | smalltalk
+    routed_to: Mapped[str] = mapped_column(String(32))
     tool_calls: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     retrieved_chunk_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     latency_ms: Mapped[int] = mapped_column(default=0)

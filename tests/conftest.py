@@ -1,21 +1,11 @@
-"""
-Test fixtures.
-
-Key fixtures:
-- `client`: async test client with in-memory SQLite DB
-- `mock_adk`: patches the ADK root agent so tests don't hit the real LLM
-- `seeded_db`: DB with a test user and session pre-created
-"""
 import pytest
 import pytest_asyncio
-from fastapi.testclient import TestClient
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.models import Base
 from app.db.session import get_db
 from app.main import app
-
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -39,9 +29,12 @@ async def db() -> AsyncSession:
 
 
 @pytest_asyncio.fixture
-async def client(db):
-    """Async test client with DB overridden to in-memory SQLite."""
-    app.dependency_overrides[get_db] = lambda: db
+async def client(db: AsyncSession):
+
+    async def _get_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _get_db
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
     app.dependency_overrides.clear()
@@ -49,26 +42,29 @@ async def client(db):
 
 @pytest.fixture
 def mock_adk(monkeypatch):
-    """
-    Patch the ADK pipeline so tests don't call the real LLM.
 
-    TODO for candidate: patch at the ADK boundary (not at the HTTP layer).
-    The mock should:
-    1. Accept a user message
-    2. Return a canned response with a specified routed_to value
-    3. Allow tests to assert which sub-agent was called
+    async def fake_execute_turn(session_id, user_message, state):
+        from app.agents.adk_runner import AdkTurnResult
 
-    Example:
-        def mock_run(session_id, message, db):
-            if "rotate" in message.lower():
-                return PipelineResult(
-                    content="To rotate a deploy key...",
-                    routed_to="knowledge",
-                    trace_id="test-trace-001",
-                )
-            ...
+        q = user_message.lower()
+        if "rotate" in q or ("deploy" in q and "key" in q):
+            return AdkTurnResult(
+                reply="According to [chunk_abc] you can rotate a deploy key in Settings.",
+                routed_to="knowledge",
+                tool_calls=[
+                    {
+                        "tool_name": "search_docs",
+                        "args": {"query": "rotate deploy key", "k": 3},
+                        "result": {"ok": True},
+                    }
+                ],
+                retrieved_chunk_ids=["chunk_abc"],
+            )
+        return AdkTurnResult(
+            reply=f"Your current plan tier is {state.plan_tier}.",
+            routed_to="smalltalk",
+            tool_calls=[],
+            retrieved_chunk_ids=[],
+        )
 
-        monkeypatch.setattr("app.srop.pipeline.run", mock_run)
-    """
-    # TODO: implement mock_adk fixture
-    pass
+    monkeypatch.setattr("app.srop.pipeline.execute_turn", fake_execute_turn)
